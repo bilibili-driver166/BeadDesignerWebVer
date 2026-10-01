@@ -128,6 +128,9 @@
   <button id="btn-del-ref">删除参考图</button>
   <button id="btn-clear">清空画布</button>
   <label><input type="checkbox" id="crop-empty"> 裁剪空白</label>
+  <label><input type="checkbox" id="rescale"> 游戏内缩放</label>
+  <button id="btn-import">导入</button>
+  <button id="btn-export">导出</button>
   <button id="btn-gen">生成命令</button>
   <button id="btn-design">完成设计</button>
   <button id="btn-codes" disabled>显示色号</button>
@@ -135,6 +138,7 @@
   <label>玩家: <input type="text" id="player" value="@s" style="width:70px"></label>
   <input type="file" id="file-upload" accept="image/*" style="display:none">
   <input type="file" id="file-ref" accept="image/*" style="display:none">
+  <input type="file" id="file-import" accept=".json,application/json" style="display:none">
 </div>
 
 <div class="main">
@@ -238,6 +242,8 @@ const COLORS = [
 const COLORS_RGB = COLORS.map(c => [(c>>16)&255, (c>>8)&255, c&255]);
 const DIM_A = 0.20;
 const REF_A = 0.32;
+const FILE_FORMAT = 'brainlayers-pegboard';
+const FILE_VERSION = 1;
 
 /* ============================================================
    工具函数
@@ -552,8 +558,9 @@ function generateCommand(silent) {
   const player = $('player').value.trim() || '@s';
   const size = Math.max(w, h);
   const pxStr = out.join(',');
+  const rescale = $('rescale').checked ? '1b' : '0b';
   const inner = `Size:${size},Width:${w},Height:${h},`
-    + `BeadDataVersion:2,NeedRescale:0b,Pixels:[I;${pxStr}]`;
+    + `BeadDataVersion:2,NeedRescale:${rescale},Pixels:[I;${pxStr}]`;
   let cmd;
   if ($('mcver').value === '1.21.1') {
     cmd = `/give ${player} brainlayers:bead_artwork[custom_data={${inner}}]`;
@@ -858,6 +865,75 @@ function clearReference() {
 }
 
 /* ============================================================
+   导入 / 导出
+   ============================================================ */
+function exportJson() {
+  const data = {
+    format: FILE_FORMAT,
+    version: FILE_VERSION,
+    boardSize: state.boardSize,
+    pixels: state.pixels.slice(),
+    settings: {
+      player: $('player').value,
+      mcVersion: $('mcver').value,
+      cropEmpty: $('crop-empty').checked,
+      needRescale: $('rescale').checked
+    }
+  };
+  const blob = new Blob([JSON.stringify(data)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'pegboard.json';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  statusBar.textContent = '已导出 pegboard.json';
+}
+
+async function importJson(file) {
+  try {
+    const text = await file.text();
+    const data = JSON.parse(text);
+    if (data.format !== FILE_FORMAT) { alert('这不是拼豆文件。'); return; }
+    const board = data.boardSize;
+    const pixels = data.pixels;
+    if (![16,32,64,128].includes(board)
+        || !Array.isArray(pixels)
+        || pixels.length !== board * board) {
+      alert('拼豆板尺寸或像素数量不对。'); return;
+    }
+    if (state.pixels.some(v => v > 0)) {
+      if (!confirm('会覆盖当前画布，继续？')) return;
+    }
+    state.boardSize = board;
+    $('size-select').value = String(board);
+    state.pixels = pixels.map(v => Number(v) | 0);
+    state.hover = null;
+    state.hoverColor = null;
+    state.zoom = 1; state.panX = 0; state.panY = 0;
+    if (state.refImage) refCellData = rasterizeFit(state.refImage, board, board);
+    else refCellData = null;
+
+    const s = data.settings || {};
+    if (typeof s.player === 'string') $('player').value = s.player;
+    if (s.mcVersion === '1.20.1' || s.mcVersion === '1.21.1') $('mcver').value = s.mcVersion;
+    $('crop-empty').checked = !!s.cropEmpty;
+    $('rescale').checked = !!s.needRescale;
+
+    rebuildBase();
+    rebuildMask();
+    render();
+    updateStats();
+    cmdText.value = ''; cmdLen.textContent = '长度 0';
+    statusBar.textContent = '已导入 ' + file.name;
+  } catch (err) {
+    alert('导入失败: ' + err.message);
+  }
+}
+
+/* ============================================================
    板子尺寸 / 清空 / 完成设计
    ============================================================ */
 function onSizeChange(newSize) {
@@ -959,6 +1035,13 @@ $('file-ref').addEventListener('change', e => {
 $('btn-del-ref').addEventListener('click', clearReference);
 $('btn-clear').addEventListener('click', clearCanvas);
 $('crop-empty').addEventListener('change', refreshCommandIfAny);
+$('rescale').addEventListener('change', refreshCommandIfAny);
+$('btn-import').addEventListener('click', () => $('file-import').click());
+$('file-import').addEventListener('change', e => {
+  if (e.target.files[0]) importJson(e.target.files[0]);
+  e.target.value = '';
+});
+$('btn-export').addEventListener('click', exportJson);
 $('btn-gen').addEventListener('click', () => generateCommand(false));
 $('btn-design').addEventListener('click', toggleDesign);
 $('btn-codes').addEventListener('click', toggleCodes);
