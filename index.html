@@ -44,11 +44,9 @@
     0 0 0 4px #fff; z-index: 2; }
   .palette.disabled { filter: grayscale(1) brightness(.6); pointer-events: none; }
 
-  /* 画布容器：flex 居中，黑色背景 */
   .canvas-wrap { flex: 1; position: relative; overflow: hidden; background: #1e1e1e;
     display: flex; align-items: center; justify-content: center;
     min-width: 0; min-height: 0; }
-  /* 画布元素尺寸 = 网格尺寸，由 JS 动态设置 */
   #canvas { display: block; touch-action: none; cursor: crosshair;
     user-select: none; -webkit-user-select: none; }
 
@@ -117,6 +115,12 @@
   <label>拼豆板:
     <select id="size-select">
       <option>16</option><option>32</option><option>64</option><option>128</option>
+    </select>
+  </label>
+  <label>MC版本:
+    <select id="mcver">
+      <option>1.20.1</option>
+      <option>1.21.1</option>
     </select>
   </label>
   <button id="btn-upload">上传图片</button>
@@ -313,7 +317,7 @@ const maskCtx = maskCanvas.getContext('2d');
 let refCellData = null;
 
 /* ============================================================
-   布局：返回网格在 canvas-wrap 内的逻辑尺寸
+   布局
    ============================================================ */
 function computeLayout() {
   const wrapW = canvasWrap.clientWidth;
@@ -391,7 +395,6 @@ function render() {
   const { cell, gridSize, n } = computeLayout();
   if (gridSize <= 0) return;
 
-  /* canvas 元素尺寸 = 网格尺寸，居中；pan 用 transform 偏移 */
   canvas.style.width = gridSize + 'px';
   canvas.style.height = gridSize + 'px';
   canvas.style.transform = `translate(${state.panX}px, ${state.panY}px)`;
@@ -549,9 +552,14 @@ function generateCommand(silent) {
   const player = $('player').value.trim() || '@s';
   const size = Math.max(w, h);
   const pxStr = out.join(',');
-  const cmd = `/give ${player} brainlayers:bead_artwork`
-    + `{Size:${size},Width:${w},Height:${h},`
-    + `BeadDataVersion:2,NeedRescale:0b,Pixels:[I;${pxStr}]}`;
+  const inner = `Size:${size},Width:${w},Height:${h},`
+    + `BeadDataVersion:2,NeedRescale:0b,Pixels:[I;${pxStr}]`;
+  let cmd;
+  if ($('mcver').value === '1.21.1') {
+    cmd = `/give ${player} brainlayers:bead_artwork[custom_data={${inner}}]`;
+  } else {
+    cmd = `/give ${player} brainlayers:bead_artwork{${inner}}`;
+  }
   cmdText.value = cmd;
   cmdLen.textContent = '长度 ' + cmd.length;
   statusBar.textContent = `已生成命令，尺寸 ${w}×${h}，长度 ${cmd.length}`;
@@ -562,7 +570,7 @@ function refreshCommandIfAny() {
 }
 
 /* ============================================================
-   坐标（基于 canvas 元素的 getBoundingClientRect，已含 transform）
+   坐标
    ============================================================ */
 function cellAt(clientX, clientY) {
   const rect = canvas.getBoundingClientRect();
@@ -663,7 +671,7 @@ canvas.addEventListener('pointerup', endPointer);
 canvas.addEventListener('pointercancel', endPointer);
 canvas.addEventListener('contextmenu', e => e.preventDefault());
 
-/* ---------- 捏合（以 canvas-wrap 坐标为参照） ---------- */
+/* ---------- 捏合 ---------- */
 function startPinch() {
   const arr = [...pointers.values()];
   if (arr.length < 2) return;
@@ -934,6 +942,7 @@ async function copyCommand() {
    事件绑定
    ============================================================ */
 $('size-select').addEventListener('change', e => onSizeChange(+e.target.value));
+$('mcver').addEventListener('change', refreshCommandIfAny);
 $('btn-upload').addEventListener('click', () => {
   if (state.completed) { alert('请先点击「修改设计」再编辑。'); return; }
   $('file-upload').click();
@@ -982,7 +991,6 @@ $('search-input').addEventListener('keydown', e => {
   if (e.key === 'Enter') doSearch();
 });
 
-/* 窗口/容器尺寸变化时重新布局 */
 window.addEventListener('resize', () => { rebuildBase(); rebuildMask(); render(); });
 if (window.ResizeObserver) {
   new ResizeObserver(() => { rebuildBase(); rebuildMask(); render(); }).observe(canvasWrap);
