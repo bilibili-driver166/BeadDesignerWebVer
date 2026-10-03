@@ -3,7 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
-<title>拼豆设计器</title>
+<title>拼豆实验室 Bead Lab</title>
+<script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
 <style>
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
   html, body { margin: 0; padding: 0; height: 100%; overflow: hidden;
@@ -20,6 +21,7 @@
   .toolbar button:disabled { opacity: .5; cursor: default; }
   .toolbar input[type=text] { cursor: text; }
   .toolbar button.active { background: #4a90e2; color: #fff; border-color: #2c6bb8; }
+  .toolbar .title-input { width: 90px; }
 
   .main { flex: 1; display: flex; min-height: 0; }
 
@@ -64,9 +66,19 @@
   .panel textarea { flex: 1; width: 100%; border: 0; padding: 6px;
     font-family: Consolas, "Courier New", monospace; font-size: 11px;
     resize: none; outline: none; word-break: break-all; }
-  #stat-pre { flex: 1; margin: 0; padding: 6px; overflow: auto;
-    font-family: Consolas, "Courier New", monospace; font-size: 11px;
-    white-space: pre; }
+
+  #stat-list { flex: 1; overflow: auto; padding: 6px;
+    font-family: Consolas, "Courier New", monospace; font-size: 11px; }
+  #stat-list .empty { color: #999; }
+  #stat-list .row { display: flex; align-items: center; gap: 8px;
+    line-height: 1.6; }
+  #stat-list .swatch { width: 14px; height: 14px; flex-shrink: 0;
+    border: 1px solid #333; border-radius: 2px; }
+  #stat-list .code { width: 44px; }
+  #stat-list .count { text-align: right; flex: 1; }
+  #stat-list .total { border-top: 1px solid #999; margin-top: 4px;
+    padding-top: 4px; }
+  #stat-list .hidden { visibility: hidden; }
 
   .status-bar { padding: 4px 10px; background: #e8e8e8; border-top: 1px solid #ccc;
     font-size: 12px; color: #333; min-height: 22px; flex-shrink: 0;
@@ -123,6 +135,7 @@
       <option>1.21.1</option>
     </select>
   </label>
+  <label>标题: <input type="text" id="title-input" class="title-input" value="拼豆图纸"></label>
   <button id="btn-upload">上传图片</button>
   <button id="btn-ref">上传参考图</button>
   <button id="btn-del-ref">删除参考图</button>
@@ -130,7 +143,9 @@
   <label><input type="checkbox" id="crop-empty"> 裁剪空白</label>
   <label><input type="checkbox" id="rescale"> 游戏内缩放</label>
   <button id="btn-import">导入</button>
-  <button id="btn-export">导出</button>
+  <button id="btn-export">导出JSON</button>
+  <button id="btn-export-png">导出PNG</button>
+  <button id="btn-export-pdf">导出PDF</button>
   <button id="btn-gen">生成命令</button>
   <button id="btn-design">完成设计</button>
   <button id="btn-codes" disabled>显示色号</button>
@@ -164,7 +179,7 @@
     </div>
     <div class="panel">
       <div class="panel-head"><span>用量统计</span></div>
-      <pre id="stat-pre">（无数据）</pre>
+      <div id="stat-list"><div class="empty">（无数据）</div></div>
     </div>
   </div>
 </div>
@@ -242,7 +257,8 @@ const COLORS = [
 const COLORS_RGB = COLORS.map(c => [(c>>16)&255, (c>>8)&255, c&255]);
 const DIM_A = 0.20;
 const REF_A = 0.32;
-const FILE_FORMAT = 'brainlayers-pegboard';
+const FILE_FORMAT = 'beadlab';
+const FILE_FORMAT_LEGACY = 'brainlayers-pegboard';
 const FILE_VERSION = 1;
 
 /* ============================================================
@@ -277,7 +293,10 @@ function fitInto(srcW, srcH, dstW, dstH) {
   const nh = Math.max(1, Math.round(srcH*scale));
   return { nw, nh, ox: Math.floor((dstW-nw)/2), oy: Math.floor((dstH-nh)/2) };
 }
-
+function safeFilename(name) {
+  const clean = String(name || '').replace(/[\\/:*?"<>|]/g, '_').trim();
+  return clean || '拼豆图纸';
+}
 const supportsHover = window.matchMedia('(hover: hover)').matches;
 
 /* ============================================================
@@ -310,7 +329,7 @@ const paletteEl = $('palette');
 const colorGrid = $('color-grid');
 const cmdText = $('cmd-text');
 const cmdLen = $('cmd-len');
-const statPre = $('stat-pre');
+const statList = $('stat-list');
 const statusBar = $('status');
 const tooltip = $('tooltip');
 const ttSwatch = $('tt-swatch');
@@ -507,7 +526,7 @@ function parseSearch(text) {
    ============================================================ */
 function updateStats() {
   if (!state.pixels.some(v => v > 0)) {
-    statPre.textContent = '（无数据）';
+    statList.innerHTML = '<div class="empty">（无数据）</div>';
     return;
   }
   const counts = new Map();
@@ -516,16 +535,27 @@ function updateStats() {
   }
   const items = [...counts.entries()].sort((a, b) =>
     b[1] - a[1] || a[0] - b[0]);
-  const lines = [];
+  let html = '';
   let total = 0;
   for (const [idx, c] of items) {
-    lines.push(CODES[idx].padStart(5) + '  ' + String(c).padStart(6));
+    html += '<div class="row">'
+          + `<div class="swatch" style="background:${hexOf(COLORS[idx])}"></div>`
+          + `<div class="code">${CODES[idx]}</div>`
+          + `<div class="count">${c}</div>`
+          + '</div>';
     total += c;
   }
-  lines.push('--------------');
-  lines.push(' 总计'.padStart(5).padEnd(7) + String(total).padStart(6));
-  lines.push(' 色数'.padStart(5).padEnd(7) + String(items.length).padStart(6));
-  statPre.textContent = lines.join('\n');
+  html += '<div class="row total">'
+        + '<div class="swatch hidden"></div>'
+        + '<div class="code">总计</div>'
+        + `<div class="count">${total}</div>`
+        + '</div>';
+  html += '<div class="row">'
+        + '<div class="swatch hidden"></div>'
+        + '<div class="code">色数</div>'
+        + `<div class="count">${items.length}</div>`
+        + '</div>';
+  statList.innerHTML = html;
 }
 
 function generateCommand(silent) {
@@ -678,7 +708,6 @@ canvas.addEventListener('pointerup', endPointer);
 canvas.addEventListener('pointercancel', endPointer);
 canvas.addEventListener('contextmenu', e => e.preventDefault());
 
-/* ---------- 捏合 ---------- */
 function startPinch() {
   const arr = [...pointers.values()];
   if (arr.length < 2) return;
@@ -706,26 +735,21 @@ function updatePinch() {
   const cy = (p1.y + p2.y) / 2;
   const dist = Math.hypot(p2.x - p1.x, p2.y - p1.y);
   if (pinchState.dist < 1) return;
-
   const wrapRect = canvasWrap.getBoundingClientRect();
   const wrapX = cx - wrapRect.left;
   const wrapY = cy - wrapRect.top;
-
   const scale = dist / pinchState.dist;
   const newZoom = Math.max(0.15, Math.min(12, pinchState.zoom * scale));
-
   const { wrapW, wrapH, n } = computeLayout();
   const base = Math.min(wrapW/n, wrapH/n);
   const newCell = Math.max(2, Math.floor(base * newZoom));
   const newGridSize = newCell * n;
-
   state.zoom = newZoom;
   state.panX = wrapX - (wrapW - newGridSize)/2 - pinchState.gridX * newCell;
   state.panY = wrapY - (wrapH - newGridSize)/2 - pinchState.gridY * newCell;
   render();
 }
 
-/* ---------- 滚轮 ---------- */
 canvas.addEventListener('wheel', e => {
   e.preventDefault();
   const wrapRect = canvasWrap.getBoundingClientRect();
@@ -736,12 +760,10 @@ canvas.addEventListener('wheel', e => {
   const canvasTop = (wrapH - gridSize)/2 + state.panY;
   const gx = (wrapX - canvasLeft) / cell;
   const gy = (wrapY - canvasTop) / cell;
-
   const factor = e.deltaY < 0 ? 1.15 : 1/1.15;
   const newZoom = Math.max(0.15, Math.min(12, state.zoom * factor));
   if (Math.abs(newZoom - state.zoom) < 1e-6) return;
   state.zoom = newZoom;
-
   const base = Math.min(wrapW/n, wrapH/n);
   const newCell = Math.max(2, Math.floor(base * state.zoom));
   const newGridSize = newCell * n;
@@ -755,9 +777,6 @@ canvas.addEventListener('dblclick', () => {
   render();
 });
 
-/* ============================================================
-   悬浮框（桌面）
-   ============================================================ */
 function updateTooltip(clientX, clientY) {
   if (!state.hover) { tooltip.classList.remove('show'); return; }
   const [x, y] = state.hover;
@@ -865,7 +884,7 @@ function clearReference() {
 }
 
 /* ============================================================
-   导入 / 导出
+   导入 / 导出 JSON
    ============================================================ */
 function exportJson() {
   const data = {
@@ -873,6 +892,7 @@ function exportJson() {
     version: FILE_VERSION,
     boardSize: state.boardSize,
     pixels: state.pixels.slice(),
+    title: $('title-input').value || '拼豆图纸',
     settings: {
       player: $('player').value,
       mcVersion: $('mcver').value,
@@ -881,22 +901,18 @@ function exportJson() {
     }
   };
   const blob = new Blob([JSON.stringify(data)], { type: 'application/json' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = 'pegboard.json';
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
-  statusBar.textContent = '已导出 pegboard.json';
+  const filename = safeFilename($('title-input').value) + '.json';
+  downloadBlob(blob, filename);
+  statusBar.textContent = '已导出 ' + filename;
 }
 
 async function importJson(file) {
   try {
     const text = await file.text();
     const data = JSON.parse(text);
-    if (data.format !== FILE_FORMAT) { alert('这不是拼豆文件。'); return; }
+    if (data.format !== FILE_FORMAT && data.format !== FILE_FORMAT_LEGACY) {
+      alert('这不是拼豆文件。'); return;
+    }
     const board = data.boardSize;
     const pixels = data.pixels;
     if (![16,32,64,128].includes(board)
@@ -916,6 +932,7 @@ async function importJson(file) {
     if (state.refImage) refCellData = rasterizeFit(state.refImage, board, board);
     else refCellData = null;
 
+    if (typeof data.title === 'string') $('title-input').value = data.title;
     const s = data.settings || {};
     if (typeof s.player === 'string') $('player').value = s.player;
     if (s.mcVersion === '1.20.1' || s.mcVersion === '1.21.1') $('mcver').value = s.mcVersion;
@@ -931,6 +948,301 @@ async function importJson(file) {
   } catch (err) {
     alert('导入失败: ' + err.message);
   }
+}
+
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+/* ============================================================
+   导出 PNG
+   ============================================================ */
+function exportPng() {
+  const n = state.boardSize;
+  const CELL = 24;
+  const PAD = 40;
+  const HEAD = 60;
+  const FOOT = 40;
+  const W = CELL * n + PAD * 2;
+  const H = HEAD + CELL * n + FOOT;
+
+  const c = document.createElement('canvas');
+  c.width = W; c.height = H;
+  const g = c.getContext('2d');
+  g.fillStyle = '#ffffff';
+  g.fillRect(0, 0, W, H);
+
+  const title = $('title-input').value || '拼豆图纸';
+  g.fillStyle = '#000';
+  g.font = 'bold 24px sans-serif';
+  g.textAlign = 'center';
+  g.textBaseline = 'middle';
+  g.fillText(title, W/2, 30);
+
+  const x0 = PAD, y0 = HEAD;
+  for (let gy = 0; gy < n; gy++) {
+    for (let gx = 0; gx < n; gx++) {
+      const v = state.pixels[gy*n + gx];
+      const cx = x0 + gx*CELL, cy = y0 + gy*CELL;
+      g.fillStyle = v > 0 ? hexOf(COLORS[v-1]) : '#f5f5f5';
+      g.fillRect(cx, cy, CELL, CELL);
+      g.strokeStyle = '#505050';
+      g.lineWidth = 1;
+      g.strokeRect(cx + 0.5, cy + 0.5, CELL - 1, CELL - 1);
+      if (v > 0) {
+        g.fillStyle = contrastFg(COLORS[v-1]);
+        g.font = 'bold 12px sans-serif';
+        g.textAlign = 'center';
+        g.textBaseline = 'middle';
+        g.fillText(CODES[v-1], cx + CELL/2, cy + CELL/2);
+      }
+    }
+  }
+
+  g.fillStyle = '#888';
+  g.font = '14px sans-serif';
+  g.textAlign = 'center';
+  g.textBaseline = 'middle';
+  g.fillText(`${n} × ${n}`, W/2, H - 20);
+
+  c.toBlob(blob => {
+    const filename = safeFilename($('title-input').value) + '.png';
+    downloadBlob(blob, filename);
+    statusBar.textContent = '已导出 ' + filename;
+  }, 'image/png');
+}
+
+/* ============================================================
+   导出 PDF（Canvas 绘制 + jsPDF 嵌入）
+   ============================================================ */
+function exportPdf() {
+  if (typeof window.jspdf === 'undefined') {
+    alert('jsPDF 未加载，请检查网络。');
+    return;
+  }
+  const { jsPDF } = window.jspdf;
+
+  const n = state.boardSize;
+  const title = $('title-input').value || '拼豆图纸';
+
+  const PAGE_MAX = 32;                          // 每页最大 32×32
+  const pagesX = Math.ceil(n / PAGE_MAX);
+  const pagesY = Math.ceil(n / PAGE_MAX);
+  const total = pagesX * pagesY;
+
+  const PDF_W = 297, PDF_H = 210;
+  const pdf = new jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' });
+
+  const PX_PER_MM = 8;
+  const CW = Math.round(PDF_W * PX_PER_MM);
+  const CH = Math.round(PDF_H * PX_PER_MM);
+
+  const MARGIN = 6;
+  const TOP = 13;
+  const BOTTOM = 8;
+  const AXIS_MM = 5;   // 坐标轴数字占的边距
+
+  const showCodesInGrid = true;
+
+  let firstPage = true;
+
+  for (let py = 0; py < pagesY; py++) {
+    for (let px = 0; px < pagesX; px++) {
+      if (!firstPage) pdf.addPage();
+      firstPage = false;
+
+      const pageIdx = py * pagesX + px + 1;
+      const xStart = px * PAGE_MAX, yStart = py * PAGE_MAX;
+      const xEnd = Math.min(xStart + PAGE_MAX, n);
+      const yEnd = Math.min(yStart + PAGE_MAX, n);
+      const pw = xEnd - xStart, ph = yEnd - yStart;
+
+      // 这一页颜色统计
+      const counts = new Map();
+      for (let gy = yStart; gy < yEnd; gy++) {
+        for (let gx = xStart; gx < xEnd; gx++) {
+          const v = state.pixels[gy*n + gx];
+          if (v > 0) counts.set(v-1, (counts.get(v-1) || 0) + 1);
+        }
+      }
+      const items = [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0] - b[0]);
+
+      const c = document.createElement('canvas');
+      c.width = CW; c.height = CH;
+      const g = c.getContext('2d');
+      g.fillStyle = '#ffffff';
+      g.fillRect(0, 0, CW, CH);
+
+      // 标题
+      g.fillStyle = '#000';
+      g.font = `bold ${Math.round(5 * PX_PER_MM)}px sans-serif`;
+      g.textAlign = 'center';
+      g.textBaseline = 'middle';
+      g.fillText(`${title} - 第 ${pageIdx} / ${total} 页`, CW/2, 7 * PX_PER_MM);
+
+      // ============ 布局 ============
+      const usableH = PDF_H - TOP - BOTTOM;
+
+      // 右侧表格
+      const tableRowH = 5;
+      const tableHeaderH = 6;
+      const tableColW = 32;
+      const tableRowsPerCol = Math.max(1, Math.floor((usableH - tableHeaderH) / tableRowH));
+      let tableCols = Math.max(1, Math.ceil(items.length / tableRowsPerCol));
+      if (tableCols > 3) tableCols = 3;
+      const tableW = tableCols * tableColW;
+
+      // 中间网格区域（无左侧列表）
+      const gridAreaX = MARGIN;
+      const gridAreaY = TOP;
+      const gridAreaW = PDF_W - MARGIN * 2 - tableW - 2;
+      const gridAreaH = usableH;
+
+      // 网格实际可用区域（去掉坐标轴边距）
+      const cellAreaW = gridAreaW - AXIS_MM;
+      const cellAreaH = gridAreaH - AXIS_MM;
+
+      const cellMM = Math.min(cellAreaW / pw, cellAreaH / ph);
+      const gridW = cellMM * pw;
+      const gridH = cellMM * ph;
+
+      // 网格原点：左对齐 + 上方留出坐标轴空间
+      const gridX = gridAreaX + AXIS_MM;
+      const gridY = gridAreaY + AXIS_MM + (cellAreaH - gridH) / 2;
+
+      const cellPx = cellMM * PX_PER_MM;
+      const gridXPx = gridX * PX_PER_MM;
+      const gridYPx = gridY * PX_PER_MM;
+      const axisPx = AXIS_MM * PX_PER_MM;
+      const gridLineW = Math.max(1, Math.round(cellPx / 20));
+
+      // ============ 绘制网格 ============
+      for (let gy = 0; gy < ph; gy++) {
+        for (let gx = 0; gx < pw; gx++) {
+          const v = state.pixels[(yStart + gy)*n + (xStart + gx)];
+          const cx = gridXPx + gx * cellPx;
+          const cy = gridYPx + gy * cellPx;
+          g.fillStyle = v > 0 ? hexOf(COLORS[v-1]) : '#f5f5f5';
+          g.fillRect(cx, cy, cellPx, cellPx);
+          g.strokeStyle = '#666';
+          g.lineWidth = gridLineW;
+          g.strokeRect(cx + gridLineW/2, cy + gridLineW/2,
+                       cellPx - gridLineW, cellPx - gridLineW);
+          if (showCodesInGrid && v > 0) {
+            const fs = Math.max(6, Math.floor(cellPx * 0.42));
+            g.fillStyle = contrastFg(COLORS[v-1]);
+            g.font = `bold ${fs}px sans-serif`;
+            g.textAlign = 'center';
+            g.textBaseline = 'middle';
+            g.fillText(CODES[v-1], cx + cellPx/2, cy + cellPx/2);
+          }
+        }
+      }
+
+      // ============ 坐标轴 ============
+      const axisFontSize = Math.max(7, Math.floor(cellPx * 0.42));
+      g.font = `bold ${axisFontSize}px sans-serif`;
+      g.fillStyle = '#000';
+      g.textAlign = 'center';
+      g.textBaseline = 'bottom';
+
+      // 上横轴：整幅图的绝对坐标
+      for (let gx = 0; gx < pw; gx++) {
+        const absX = xStart + gx + 1;
+        const cx = gridXPx + gx * cellPx + cellPx / 2;
+        const cy = gridYPx - 1;
+        g.fillText(String(absX), cx, cy);
+      }
+
+      // 左纵轴：整幅图的绝对坐标
+      g.textAlign = 'right';
+      g.textBaseline = 'middle';
+      for (let gy = 0; gy < ph; gy++) {
+        const absY = yStart + gy + 1;
+        const cx = gridXPx - 2;
+        const cy = gridYPx + gy * cellPx + cellPx / 2;
+        g.fillText(String(absY), cx, cy);
+      }
+
+      // ============ 右侧表格 ============
+      const tx0 = (PDF_W - MARGIN - tableW) * PX_PER_MM;
+      const ty0 = TOP * PX_PER_MM;
+      const headerHpx = tableHeaderH * PX_PER_MM;
+      const rowHpx = tableRowH * PX_PER_MM;
+      const colWpx = tableColW * PX_PER_MM;
+
+      for (let col = 0; col < tableCols; col++) {
+        const colX = tx0 + col * colWpx;
+
+        g.fillStyle = '#f0f0f0';
+        g.fillRect(colX, ty0, colWpx, headerHpx);
+        g.strokeStyle = '#333';
+        g.lineWidth = 1;
+        g.strokeRect(colX + 0.5, ty0 + 0.5, colWpx - 1, headerHpx - 1);
+        g.fillStyle = '#000';
+        g.font = `bold ${Math.round(2.6 * PX_PER_MM)}px sans-serif`;
+        g.textAlign = 'left';
+        g.textBaseline = 'middle';
+        const headerY = ty0 + headerHpx / 2;
+        g.fillText('色号', colX + 1.5 * PX_PER_MM, headerY);
+        g.fillText('数量', colX + 11 * PX_PER_MM, headerY);
+        g.fillText('已完成', colX + 18 * PX_PER_MM, headerY);
+
+        for (let r = 0; r < tableRowsPerCol; r++) {
+          const i = col * tableRowsPerCol + r;
+          if (i >= items.length) break;
+          const idx = items[i][0], cnt = items[i][1];
+          const rowY = ty0 + headerHpx + r * rowHpx;
+
+          g.strokeStyle = '#bbb';
+          g.lineWidth = 0.5;
+          g.beginPath();
+          g.moveTo(colX, rowY + rowHpx);
+          g.lineTo(colX + colWpx, rowY + rowHpx);
+          g.stroke();
+
+          const swW = 3 * PX_PER_MM;
+          const swH = 3 * PX_PER_MM;
+          const swX = colX + 1 * PX_PER_MM;
+          const swY = rowY + (rowHpx - swH) / 2;
+          g.fillStyle = hexOf(COLORS[idx]);
+          g.fillRect(swX, swY, swW, swH);
+          g.strokeStyle = '#333';
+          g.lineWidth = 0.6;
+          g.strokeRect(swX, swY, swW, swH);
+
+          g.fillStyle = '#000';
+          g.font = `${Math.round(2.4 * PX_PER_MM)}px sans-serif`;
+          g.textAlign = 'left';
+          g.textBaseline = 'middle';
+          g.fillText(CODES[idx], colX + 5 * PX_PER_MM, rowY + rowHpx/2);
+
+          g.textAlign = 'right';
+          g.fillText(String(cnt), colX + 17 * PX_PER_MM, rowY + rowHpx/2);
+
+          g.strokeStyle = '#333';
+          g.lineWidth = 0.8;
+          g.strokeRect(colX + 18 * PX_PER_MM,
+                       rowY + (rowHpx - 3*PX_PER_MM) / 2,
+                       3 * PX_PER_MM, 3 * PX_PER_MM);
+        }
+      }
+
+      const imgData = c.toDataURL('image/jpeg', 0.92);
+      pdf.addImage(imgData, 'JPEG', 0, 0, PDF_W, PDF_H);
+    }
+  }
+
+  const filename = safeFilename($('title-input').value) + '.pdf';
+  pdf.save(filename);
+  statusBar.textContent = '已导出 ' + filename;
 }
 
 /* ============================================================
@@ -1042,6 +1354,8 @@ $('file-import').addEventListener('change', e => {
   e.target.value = '';
 });
 $('btn-export').addEventListener('click', exportJson);
+$('btn-export-png').addEventListener('click', exportPng);
+$('btn-export-pdf').addEventListener('click', exportPdf);
 $('btn-gen').addEventListener('click', () => generateCommand(false));
 $('btn-design').addEventListener('click', toggleDesign);
 $('btn-codes').addEventListener('click', toggleCodes);
